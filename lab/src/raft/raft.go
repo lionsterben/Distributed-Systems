@@ -71,8 +71,8 @@ type Raft struct {
 	commitCount  int
 	electWin     chan bool
 	grant        chan bool
-	heartbeat    chan bool
-	applyCh		 chan ApplyMsg
+	heartBeat    chan bool
+	applyCh      chan ApplyMsg
 	//newLog 		 chan Log
 }
 
@@ -193,11 +193,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) isUptodate(candIndex int, candTerm int) bool {
 	index := len(rf.log) - 1
 	term := rf.log[len(rf.log)-1].Term
-	if candTerm != term {
-		return candTerm > term
-	} else {
-		return candIndex >= index
-	}
+	return candTerm > term || (candTerm == term && candIndex >= index)
 }
 
 //
@@ -310,8 +306,8 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term      int
+	Success   bool
 	NextIndex int
 }
 
@@ -331,30 +327,37 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		return
 	}
+	if rf.commitIndex >= args.PrevLogIndex+len(args.Enteries) {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		reply.NextIndex = rf.commitIndex + 1
+		rf.heartBeat <- true
+		return
+	}
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.currentState = "follower"
 		rf.voteCount = 0
 		rf.votedFor = -1
 	}
-	rf.heartbeat <- true
+	rf.heartBeat <- true
 	reply.Term = rf.currentTerm
 	rfLogLength := rf.getLastLogIndex()
-	if rfLogLength < args.PrevLogIndex{
+	if rfLogLength < args.PrevLogIndex {
 		reply.NextIndex = rfLogLength + 1
 		reply.Success = false
 		return
 	}
-	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm{//不匹配
-		//for i := args.PrevLogIndex-1; i > 0; i--{
-		//	if rf.log[i].Term != rf.log[args.PrevLogIndex].Term{
-		//		reply.NextIndex = i + 1
-		//		break
-		//	}
-		//}
-		reply.NextIndex = args.PrevLogIndex
+	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { //不匹配
+		// reply.NextIndex = args.PrevLogIndex
+		for i := args.PrevLogIndex - 1; i > 0; i-- {
+			if rf.log[i].Term != rf.log[args.PrevLogIndex].Term {
+				reply.NextIndex = i + 1
+				break
+			}
+		}
 		reply.Success = false
-	}else { //匹配
+	} else { //匹配
 		startInd := args.PrevLogIndex + 1
 		rf.log = rf.log[:startInd]
 		rf.log = append(rf.log, args.Enteries...)
@@ -371,15 +374,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 }
 
-func (rf *Raft) getLastLogIndex() int{
-	return len(rf.log)-1
+func (rf *Raft) getLastLogIndex() int {
+	return len(rf.log) - 1
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if !ok || rf.currentState != "leader" || rf.currentTerm != args.Term {
+	if rf.currentState != "leader" || rf.currentTerm != args.Term || !ok {
 		return ok
 	} else {
 		if reply.Term > rf.currentTerm {
@@ -389,38 +392,37 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			rf.votedFor = -1
 			return ok
 		}
-		if reply.Success{
+		if reply.Success {
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.Enteries)
 			rf.NextIndex[server] = rf.matchIndex[server] + 1
-			for i := rf.getLastLogIndex(); i > rf.commitIndex; i--{
+			for i := rf.getLastLogIndex(); i > rf.commitIndex; i-- {
 				count := 1
 				if rf.log[i].Term == rf.currentTerm {
 					for j := range rf.peers {
-						if j != rf.me && rf.matchIndex[j] >= i{
-							count ++
+						if j != rf.me && rf.matchIndex[j] >= i {
+							count++
 						}
 					}
 				}
-				if count > len(rf.peers)/2{
+				if count > len(rf.peers)/2 {
 					rf.commitIndex = i
 					go rf.applyLog()
 					break
 				}
 			}
-		}else{
+		} else {
 			rf.NextIndex[server] = reply.NextIndex
 		}
 	}
 
-
 	return ok
 }
 
-func (rf *Raft) applyLog(){
+func (rf *Raft) applyLog() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++{
-		rf.applyCh <- ApplyMsg{true,rf.log[i].Command,i}
+	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		rf.applyCh <- ApplyMsg{true, rf.log[i].Command, i}
 	}
 	rf.lastApplied = rf.commitIndex
 }
@@ -442,12 +444,12 @@ func (rf *Raft) sendAllLog() { //检测是否为leader
 	defer rf.mu.Unlock()
 	for k := range rf.peers {
 		if k != rf.me && rf.currentState == "leader" {
-			fmt.Printf("from leader %d heartbeat to %d\n", rf.me, k)
+			fmt.Printf("from leader %d heartBeat to %d\n", rf.me, k)
 			args := &AppendEntriesArgs{}
 			args.Term = rf.currentTerm
 			args.LeaderId = rf.me
-			args.PrevLogIndex = rf.NextIndex[k]-1
-			if args.PrevLogIndex >= 0{
+			args.PrevLogIndex = rf.NextIndex[k] - 1
+			if args.PrevLogIndex >= 0 {
 				args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 			}
 			if rf.getLastLogIndex() >= rf.NextIndex[k] {
@@ -468,7 +470,6 @@ func (rf *Raft) sendAllLog() { //检测是否为leader
 
 }
 
-
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft { //log数组起个头文件？
 	rf := &Raft{}
@@ -482,9 +483,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = make([]Log, 1)
 	rf.log[0] = Log{"nil", -1}
 	rf.currentState = "follower"
-	rf.heartbeat = make(chan bool)
+	rf.heartBeat = make(chan bool)
 	rf.grant = make(chan bool)
-	//rf.heartbeat = make(chan bool)
+	//rf.heartBeat = make(chan bool)
 	rf.electWin = make(chan bool)
 	rf.applyCh = applyCh
 	rf.voteCount = 0
@@ -520,7 +521,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				fmt.Printf("rf current state %s rf %d start send\n", rf.currentState, rf.me)
 				select {
 				case <-time.After(time.Duration(time.Duration(rand.Intn(500)+500) * time.Millisecond)):
-				case <-rf.heartbeat:
+				case <-rf.heartBeat:
 					rf.currentState = "follower"
 					rf.voteCount = 0
 				case <-rf.electWin:
@@ -537,7 +538,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			case "follower":
 				select {
 				case <-rf.grant:
-				case <-rf.heartbeat:
+				case <-rf.heartBeat:
 				case <-time.After(time.Duration(time.Duration(rand.Intn(500)+500) * time.Millisecond)):
 					rf.currentState = "candidate"
 				}
