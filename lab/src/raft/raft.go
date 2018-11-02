@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"bytes"
 	"fmt"
+	"labgob"
 	"sync"
 )
 import (
@@ -112,6 +114,15 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -134,6 +145,22 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var voteFor int
+	var log []Log
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&voteFor) != nil ||
+		d.Decode(&log) != nil{
+			panic("wrong")
+	}else{
+		rf.currentTerm = currentTerm
+		rf.votedFor = voteFor
+		rf.log = log
+	}
 }
 
 //
@@ -178,6 +205,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentState = "follower"
 		rf.votedFor = -1
 		rf.voteCount = 0
+		rf.persist()
 	}
 	reply.VoteGranted = false
 	reply.Term = rf.currentTerm
@@ -187,6 +215,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 	}
+	//rf.persist()
 
 }
 
@@ -235,6 +264,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.currentState = "follower"
 			rf.votedFor = -1
 			rf.voteCount = 0
+			rf.persist()
 			return ok
 		}
 		if reply.VoteGranted {
@@ -246,9 +276,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 				rf.electWin <- true
 			}
 		}
-	} else {
-		return ok
 	}
+	// else {
+	//	return ok
+	//}
+	//rf.persist()
 	return ok
 }
 
@@ -372,6 +404,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			go rf.applyLog()
 		}
 	}
+	rf.persist()
 }
 
 func (rf *Raft) getLastLogIndex() int {
@@ -413,8 +446,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		} else {
 			rf.NextIndex[server] = reply.NextIndex
 		}
+		rf.persist()
 	}
-
+	//rf.persist()
 	return ok
 }
 
@@ -467,6 +501,7 @@ func (rf *Raft) sendAllLog() { //检测是否为leader
 
 		}
 	}
+	rf.persist()
 
 }
 
